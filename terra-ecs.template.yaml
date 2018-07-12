@@ -1,0 +1,602 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates the ECS cluster, network services in the cluster, and the EC2 instances for the cluster.
+Parameters:
+  VPCID:
+    Type: AWS::EC2::VPC::Id
+  NetworkSubnetIDs:
+    Type: List<AWS::EC2::Subnet::Id>
+  ALBSubnetIDs:
+    Type: List<AWS::EC2::Subnet::Id>
+  NumberOfTerraClients:
+    Type: Number
+  NumberOfTerraMiners:
+    Type: Number
+  InitialAccountAddresses:
+    Type: String
+  MinerAccountAddress:
+    Type: String
+  NetworkID:
+    Type: Number
+  InitialBlockGasLimit:
+    Type: Number
+  BlockGasLimit:
+    Type: Number
+  EC2InstanceProfileArn:
+    Type: String
+  EC2KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+  ECSRoleForALB:
+    Type: String
+  NumberOfEC2Instances:
+    Type: Number
+  EC2InstanceType:
+    Type: String
+  NestedTemplateOrigin:
+    Type: String
+  RootStackName:
+    Type: String
+  RunTerraExplorer:
+    Type: String
+  RunTerraStats:
+    Type: String
+  TerraNodeLogLevel:
+    Type: String
+  ClusterName:
+    Type: String
+  TerraDockerImage:
+    Type: String
+  TerraExplorerDockerImage:
+    Type: String
+  TerraStatsDockerImage:
+    Type: String
+  TerraStatsSecret:
+    Type: String
+  InitialDifficulty:
+    Type: Number
+  InitialAccountBalance:
+    Type: Number
+  GasPriceFloor:
+    Type: Number
+
+Conditions:
+  IsPublicNetwork:
+    Fn::Or:
+      - Fn::Equals:
+        - Ref: NetworkID
+        - 1
+      - Fn::Equals:
+        - Ref: NetworkID
+        - 2
+      - Fn::Equals:
+        - Ref: NetworkID
+        - 3
+      - Fn::Equals:
+        - Ref: NetworkID
+        - 4
+
+  TerraExplorerCondition:
+    Fn::Equals:
+    - Ref: RunTerraExplorer
+    - "true"
+
+  TerraStatsCondition:
+    Fn::Equals:
+    - Ref: RunTerraStats
+    - "true"
+
+Resources:
+
+  DynamoPeerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 20
+        WriteCapacityUnits: 20
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      Subnets:
+        Ref: ALBSubnetIDs
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '50'
+      SecurityGroups:
+        - Ref: LoadBalancerSecurityGroup
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName:
+        Ref: ClusterName
+
+  ServiceAutoScalingGroupStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ECSCluster
+    Properties:
+      TemplateURL: !Sub "${NestedTemplateOrigin}terra-autoscalegroup.template.yaml"
+      Parameters:
+        InstanceNames:
+          Ref: ClusterName
+        EC2KeyPairName:
+          Ref: EC2KeyPairName
+        NetworkSubnetIDs:
+          Fn::Join:
+            - ","
+            - Ref: NetworkSubnetIDs
+        NumberOfEC2Instances:
+          Ref: NumberOfEC2Instances
+        EC2SecurityGroup:
+          Ref: EC2SecurityGroup
+        EC2InstanceProfileArn:
+          Ref: EC2InstanceProfileArn
+        InstanceAMICode: AMZNECSOPTIMIZEDAMI
+        EC2InstanceType:
+          Ref: EC2InstanceType
+        LaunchScriptText: !Sub "echo ECS_CLUSTER=${ClusterName} >> /etc/ecs/ecs.config"
+
+  # Terra MINERS BEGIN
+
+  GethMinerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Miner"
+      RetentionInDays: '120'
+
+  GethMinerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Miner"
+      NetworkMode: host
+      ContainerDefinitions:
+        - Name: GethMiner
+          Cpu: '1024'
+          Essential: 'true'
+          Image: !Ref TerraDockerImage
+          Memory: '2048'
+          MemoryReservation: '1024'
+          PortMappings:
+            - ContainerPort: '8545'
+              HostPort: '8545'
+              Protocol: tcp
+            - ContainerPort: '8546'
+              HostPort: '8546'
+              Protocol: tcp
+            - ContainerPort: '30303'
+              HostPort: '30303'
+              Protocol: tcp
+            - ContainerPort: '30303'
+              HostPort: '30303'
+              Protocol: udp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group:
+                Fn::Join:
+                  - "-"
+                  - - Ref: ClusterName
+                    - "Miner"
+              awslogs-stream-prefix: Terra-miner
+          Environment:
+            - Name: CONTAINER_PLATFORM
+              Value: ecs
+          Command:
+            - Fn::If:
+              - IsPublicNetwork
+              - ""
+              - "--nodiscover"
+            - "--peer-table-name"
+            - Ref: DynamoPeerTable
+            - "--networkid"
+            - Ref: NetworkID
+            - "--initial-difficulty"
+            - Ref: InitialDifficulty
+            - "--log-level"
+            - Ref: TerraNodeLogLevel
+            - "--rpc"
+            - "--rpcapi"
+            - "web3,net,eth"
+            - "--mine"
+            - "--minerthreads"
+            - "1"
+            - "--etherbase"
+            - Ref: MinerAccountAddress
+            - "--funded-accounts"
+            - Ref: InitialAccountAddresses
+            - "--targetgaslimit"
+            - Ref: BlockGasLimit
+            - "--initial-block-gas-limit"
+            - Ref: InitialBlockGasLimit
+            - "--initial-account-balance"
+            - Ref: InitialAccountBalance
+            - "--gasprice"
+            - Ref: GasPriceFloor
+            - Fn::If:
+              - TerraStatsCondition
+              - Fn::Join:
+                - " "
+                - - "--ethstats-ws-url"
+                  - Fn::Join:
+                    - ""
+                    - - "ws://"
+                      - Fn::GetAtt: [ "LoadBalancer", "DNSName" ]
+                  - "--ethstats-ws-secret"
+                  - Ref: TerraStatsSecret
+              - ""
+
+  TerraMinerService:
+    Type: AWS::ECS::Service
+    DependsOn: ServiceAutoScalingGroupStack
+    Properties:
+      Cluster:
+        Ref: ClusterName
+      DesiredCount:
+        Ref: NumberOfTerraMiners
+      ServiceName: TerraMiner
+      TaskDefinition:
+        Ref: GethMinerTaskDefinition
+
+  # Terra MINERS END
+  # Terra CLIENTS BEGINS
+
+  GethClientLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Client"
+      RetentionInDays: '120'
+
+  GethClientTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Client"
+      NetworkMode: host
+      ContainerDefinitions:
+        - Name: GethClient
+          Cpu: '256'
+          Essential: 'true'
+          Image: !Ref TerraDockerImage
+          Memory: '1024'
+          MemoryReservation: '256'
+          PortMappings:
+          - ContainerPort: '8545'
+            HostPort: '8545'
+            Protocol: tcp
+          - ContainerPort: '8546'
+            HostPort: '8546'
+            Protocol: tcp
+          - ContainerPort: '30303'
+            HostPort: '30303'
+            Protocol: tcp
+          - ContainerPort: '30303'
+            HostPort: '30303'
+            Protocol: udp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group:
+                Fn::Join:
+                  - "-"
+                  - - Ref: ClusterName
+                    - "Client"
+              awslogs-stream-prefix: Terra-client
+          Environment:
+          - Name: CONTAINER_PLATFORM
+            Value: ecs
+          Command:
+            - Fn::If:
+              - IsPublicNetwork
+              - ""
+              - "--nodiscover"
+            - "--peer-table-name"
+            - Ref: DynamoPeerTable
+            - "--networkid"
+            - Ref: NetworkID
+            - "--initial-difficulty"
+            - Ref: InitialDifficulty
+            - "--log-level"
+            - Ref: TerraNodeLogLevel
+            - "--rpc"
+            - "--rpcapi web3,net,eth"
+            - "--rpcaddr 0.0.0.0"
+            - "--rpcvhosts *"
+            - "--rpccorsdomain *"
+            - "--ws"
+            - "--wsapi web3,net,eth"
+            - "--wsaddr 0.0.0.0"
+            - "--initial-block-gas-limit"
+            - Ref: InitialBlockGasLimit
+            - "--initial-account-balance"
+            - Ref: InitialAccountBalance
+            - "--funded-accounts"
+            - Ref: InitialAccountAddresses
+            - "--gasprice"
+            - Ref: GasPriceFloor
+            - Fn::If:
+              - TerraStatsCondition
+              - Fn::Join:
+                - " "
+                - - "--ethstats-ws-url"
+                  - Fn::Join:
+                    - ""
+                    - - "ws://"
+                      - Fn::GetAtt: [ "LoadBalancer", "DNSName" ]
+                  - "--ethstats-ws-secret"
+                  - Ref: TerraStatsSecret
+              - ""
+
+  TerraClientTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: LoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 10
+      HealthCheckPath: /
+      Port: 8545
+      Protocol: HTTP
+      VpcId:
+        Ref: VPCID
+
+  TerraClientListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: LoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TerraClientTargetGroup
+      Port: 8545
+      Protocol: HTTP
+
+  TerraClientService:
+    Type: AWS::ECS::Service
+    DependsOn: TerraClientListener
+    Properties:
+      Cluster:
+        Ref: ClusterName
+      DesiredCount:
+        Ref: NumberOfTerraClients
+      ServiceName: TerraClient
+      TaskDefinition:
+        Ref: GethClientTaskDefinition
+      LoadBalancers:
+        - ContainerName: GethClient
+          ContainerPort: 8545
+          TargetGroupArn:
+            Ref: TerraClientTargetGroup
+      Role:
+        Ref: ECSRoleForALB
+
+  # Terra CLIENTS END
+  # ETHSTATS BEGINS
+
+  TerraStatsTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: TerraStatsCondition
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 10
+      HealthCheckPath: /
+      Port: 80
+      Protocol: HTTP
+      VpcId:
+        Ref: VPCID
+
+  TerraStatsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: TerraStatsCondition
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TerraStatsTargetGroup
+      Port: 80
+      Protocol: HTTP
+
+  TerraStatsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: TerraStatsCondition
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Stats"
+      RetentionInDays: '120'
+
+  TerraStatsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: TerraStatsCondition
+    Properties:
+      Family:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Stats"
+      NetworkMode: host
+      ContainerDefinitions:
+        - Name: TerraStatsWebService
+          Cpu: '256'
+          Essential: 'true'
+          Image: !Ref TerraStatsDockerImage
+          Memory: '1024'
+          MemoryReservation: '256'
+          PortMappings:
+          - ContainerPort: '80'
+            HostPort: '80'
+            Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group:
+                Fn::Join:
+                  - "-"
+                  - - Ref: ClusterName
+                    - "Stats"
+              awslogs-stream-prefix: eth-stats
+          Environment:
+            - Name: PORT
+              Value: 80
+            - Name: WS_SECRET
+              Value:
+                Ref: TerraStatsSecret
+
+  TerraStatsService:
+    Type: AWS::ECS::Service
+    Condition: TerraStatsCondition
+    DependsOn: TerraStatsListener
+    Properties:
+      Cluster:
+        Ref: ClusterName
+      DesiredCount: '1'
+      ServiceName: TerraStats
+      TaskDefinition:
+        Ref: TerraStatsTaskDefinition
+      LoadBalancers:
+        - ContainerName: TerraStatsWebService
+          ContainerPort: 80
+          TargetGroupArn: !Ref TerraStatsTargetGroup
+      Role:
+        Ref: ECSRoleForALB
+
+  # ETHSTATS ENDS
+  # ETHEXPLORER BEGINS
+
+  TerraExplorerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: TerraExplorerCondition
+    DependsOn: LoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 10
+      HealthCheckPath: /
+      Port: 8080
+      Protocol: HTTP
+      VpcId:
+        Ref: VPCID
+
+  TerraExplorerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: TerraExplorerCondition
+    DependsOn: LoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TerraExplorerTargetGroup
+      Port: 8080
+      Protocol: HTTP
+
+  TerraExplorerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: TerraExplorerCondition
+    Properties:
+      LogGroupName:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Explorer"
+      RetentionInDays: '120'
+
+  TerraExplorerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: TerraExplorerCondition
+    Properties:
+      Family:
+        Fn::Join:
+          - "-"
+          - - Ref: ClusterName
+            - "Explorer"
+      NetworkMode: host
+      ContainerDefinitions:
+        - Name: TerraExplorerWebService
+          Cpu: '256'
+          Essential: 'true'
+          Image: !Ref TerraExplorerDockerImage
+          Memory: '1024'
+          MemoryReservation: '256'
+          PortMappings:
+          - ContainerPort: '8080'
+            HostPort: '8080'
+            Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region:
+                Ref: AWS::Region
+              awslogs-group:
+                Fn::Join:
+                  - "-"
+                  - - Ref: ClusterName
+                    - "Explorer"
+              awslogs-stream-prefix: Terra-explorer
+          Environment:
+            - Name: PORT
+              Value: 8080
+            - Name: GETH_RPCPORT
+              Value: 8545
+            - Name: GETH_HOSTNAME
+              Value:
+                Fn::GetAtt: ["LoadBalancer", "DNSName"]
+
+  TerraExplorerService:
+    Type: AWS::ECS::Service
+    Condition: TerraExplorerCondition
+    DependsOn: TerraExplorerListener
+    Properties:
+      Cluster:
+        Ref: ClusterName
+      DesiredCount: '1'
+      ServiceName: TerraExplorer
+      LoadBalancers:
+        - ContainerName: TerraExplorerWebService
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TerraExplorerTargetGroup
+      Role: !Ref ECSRoleForALB
+      TaskDefinition:
+        Ref: TerraExplorerTaskDefinition
+
+  # ETHEXPLORER ENDS
+
+Outputs:
+  LoadBalancerDNSName:
+    Value:
+      Fn::GetAtt: [ "LoadBalancer", "DNSName" ]

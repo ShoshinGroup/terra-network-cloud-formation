@@ -1,0 +1,158 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploys a Terra cluster on an existing VPC
+
+Parameters:
+  VPCID:
+    Type: AWS::EC2::VPC::Id
+  NetworkSubnetIDs:
+    Type: List<AWS::EC2::Subnet::Id>
+  ALBSubnetIDs:
+    Type: List<AWS::EC2::Subnet::Id>
+  NumberOfTerraClients:
+    Type: Number
+  NumberOfTerraMiners:
+    Type: Number
+  InitialAccountAddresses:
+    Type: String
+  MinerAccountAddress:
+    Type: String
+  NetworkID:
+    Type: Number
+  InitialBlockGasLimit:
+    Type: Number
+  BlockGasLimit:
+    Type: Number
+  EC2InstanceProfileArn:
+    Type: String
+  EC2KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+  ECSRoleForALB:
+    Type: String
+  NumberOfEC2Instances:
+    Type: Number
+  EC2InstanceType:
+    Type: String
+  NestedTemplateOrigin:
+    Type: String
+  RootStackName:
+    Type: String
+  TerraNodeLogLevel:
+    Type: String
+  RunTerraStats:
+    Type: String
+  TerraStatsSecret:
+    Type: String
+  GasPriceFloor:
+    Type: Number
+  RunTerraExplorer:
+    Type: String
+  ClusterName:
+    Type: String
+  InitialDifficulty:
+    Type: Number
+  TerraDockerImage:
+    Type: String
+  TerraStatsDockerImage:
+    Type: String
+  TerraExplorerDockerImage:
+    Type: String
+  InitialAccountBalance:
+    Type: Number
+  DockerRegion:
+    Type: String
+  DockerECRAccount:
+    Type: String
+
+Conditions:
+  IsRunningTerraExplorer:
+    Fn::Equals:
+      - Ref: RunTerraExplorer
+      - "true"
+  IsRunningTerraStats:
+    Fn::Equals:
+      - Ref: RunTerraStats
+      - "true"
+
+Resources:
+  TerraECSStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub "${NestedTemplateOrigin}terra-ecs.template.yaml"
+      Parameters:
+        VPCID:
+          Ref: VPCID
+        NetworkSubnetIDs:
+          Fn::Join:
+            - ","
+            - Ref: NetworkSubnetIDs
+        ALBSubnetIDs:
+          Fn::Join:
+            - ","
+            - Ref: ALBSubnetIDs
+        NestedTemplateOrigin:
+          Ref: NestedTemplateOrigin
+        EC2InstanceProfileArn:
+          Ref: EC2InstanceProfileArn
+        NumberOfTerraClients:
+          Ref: NumberOfTerraClients
+        NumberOfTerraMiners:
+          Ref: NumberOfTerraMiners
+        InitialAccountAddresses:
+          Ref: InitialAccountAddresses
+        MinerAccountAddress:
+          Ref: MinerAccountAddress
+        ClusterName:
+          Ref: ClusterName
+        NetworkID:
+          Ref: NetworkID
+        InitialDifficulty:
+          Ref: InitialDifficulty
+        InitialBlockGasLimit:
+          Ref: InitialBlockGasLimit
+        BlockGasLimit:
+          Ref: BlockGasLimit
+        GasPriceFloor:
+          Ref: GasPriceFloor
+        EC2KeyPairName:
+          Ref: EC2KeyPairName
+        EC2SecurityGroup:
+          Ref: EC2SecurityGroup
+        ECSRoleForALB:
+          Ref: ECSRoleForALB
+        NumberOfEC2Instances:
+          Ref: NumberOfEC2Instances
+        EC2InstanceType:
+          Ref: EC2InstanceType
+        TerraNodeLogLevel:
+          Ref: TerraNodeLogLevel
+        TerraStatsSecret:
+          Ref: TerraStatsSecret
+        RootStackName:
+          Ref: RootStackName
+        RunTerraExplorer:
+          Ref: RunTerraExplorer
+        RunTerraStats:
+          Ref: RunTerraStats
+        TerraDockerImage:
+          Ref: TerraDockerImage
+        TerraStatsDockerImage:
+          Ref: TerraStatsDockerImage
+        TerraExplorerDockerImage:
+          Ref: TerraExplorerDockerImage
+        InitialAccountBalance:
+          Ref: InitialAccountBalance
+        LoadBalancerSecurityGroup:
+          Ref: LoadBalancerSecurityGroup
+
+Outputs:
+  TerraStatsURL:
+    Value: !Sub "http://${TerraECSStack.Outputs.LoadBalancerDNSName}"
+  TerraExplorerURL:
+    Value: !Sub "http://${TerraECSStack.Outputs.LoadBalancerDNSName}:8080"
+  TerraJsonRPCURL:
+    Value: !Sub "http://${TerraECSStack.Outputs.LoadBalancerDNSName}:8545"
